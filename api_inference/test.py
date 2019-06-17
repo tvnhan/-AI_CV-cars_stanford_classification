@@ -1,74 +1,70 @@
 import os
+import csv
+import sys
+sys.path.append('../')
+
 from torch.autograd import Variable
 import torch.utils.data
 from torch.nn import DataParallel
-from config import BATCH_SIZE, PROPOSAL_NUM, test_model
-from core import model, dataset
-from core.utils import progress_bar
+import main_source.models.NTS.model as model
+from PIL import Image, ImageOps
+import torchvision.transforms as transforms
+from torch.autograd import Variable
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-if not test_model:
-    raise NameError('please set the test_model file to choose the checkpoint!')
-# read dataset
-trainset = dataset.CUB(root='./CUB_200_2011', is_train=True, data_len=None)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=BATCH_SIZE,
-                                          shuffle=True, num_workers=8, drop_last=False)
-testset = dataset.CUB(root='./CUB_200_2011', is_train=False, data_len=None)
-testloader = torch.utils.data.DataLoader(testset, batch_size=BATCH_SIZE,
-                                         shuffle=False, num_workers=8, drop_last=False)
-# define model
-net = model.attention_net(topN=PROPOSAL_NUM)
-ckpt = torch.load(test_model)
-net.load_state_dict(ckpt['net_state_dict'])
-net = net.cuda()
-net = DataParallel(net)
-creterion = torch.nn.CrossEntropyLoss()
 
-# evaluate on train set
-train_loss = 0
-train_correct = 0
-total = 0
-net.eval()
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-for i, data in enumerate(trainloader):
+def _load_name_cars(link_csv):
+    list_data = []
+    with open(link_csv) as csvDataFile:
+        csvReader = csv.reader(csvDataFile, delimiter='|')
+        for row in csvReader:
+            list_data.append(row)
+    return list_data
+
+def _convert_code_to_name(list_data, code):
+    return list_data[code]
+
+def _load_model(model_path):
+    net = model.attention_net(topN=5)
+    ckpt = torch.load(model_path)
+    net.load_state_dict(ckpt['net_state_dict'])
+    net = net.cuda()
+    net = DataParallel(net)
+    return net
+
+
+def predict_img_link(net, img_link):
+    net.eval()
     with torch.no_grad():
-        img, label = data[0].cuda(), data[1].cuda()
-        batch_size = img.size(0)
-        _, concat_logits, _, _, _ = net(img)
-        # calculate loss
-        concat_loss = creterion(concat_logits, label)
-        # calculate accuracy
+        image = Image.open(img_link).convert('RGB')  # (C, H, W)
+        transform = transforms.Compose([
+            transforms.Resize(size=(448, 448)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        image = transform(image)
+
+        image = image.to('cuda:0')
+        image = image.view(1, *image.size())
+        image = Variable(image)
+
+        _, concat_logits, _, _, _ = net(image)
         _, concat_predict = torch.max(concat_logits, 1)
-        total += batch_size
-        train_correct += torch.sum(concat_predict.data == label.data)
-        train_loss += concat_loss.item() * batch_size
-        progress_bar(i, len(trainloader), 'eval on train set')
-
-train_acc = float(train_correct) / total
-train_loss = train_loss / total
-print('train set loss: {:.3f} and train set acc: {:.3f} total sample: {}'.format(train_loss, train_acc, total))
+        print(concat_predict.data.item())
+        return concat_predict.data.item()
 
 
-# evaluate on test set
-test_loss = 0
-test_correct = 0
-total = 0
-for i, data in enumerate(testloader):
-    with torch.no_grad():
-        img, label = data[0].cuda(), data[1].cuda()
-        batch_size = img.size(0)
-        _, concat_logits, _, _, _ = net(img)
-        # calculate loss
-        concat_loss = creterion(concat_logits, label)
-        # calculate accuracy
-        _, concat_predict = torch.max(concat_logits, 1)
-        total += batch_size
-        test_correct += torch.sum(concat_predict.data == label.data)
-        test_loss += concat_loss.item() * batch_size
-        progress_bar(i, len(testloader), 'eval on test set')
+if __name__ == '__main__':
+    model_path = '../outputs/best_model.ckpt'
+    net = _load_model(model_path)
 
-test_acc = float(test_correct) / total
-test_loss = test_loss / total
-print('test set loss: {:.3f} and test set acc: {:.3f} total sample: {}'.format(test_loss, test_acc, total))
+    link_car_name = '../dataset/names.csv'
+    list_data = _load_name_cars(link_car_name)
 
-print('finishing testing')
+    img_link = '../dataset/val/00003.jpg'
+    result = predict_img_link(net, img_link)
+    print(_convert_code_to_name(list_data, int(result)))
+
+
+
